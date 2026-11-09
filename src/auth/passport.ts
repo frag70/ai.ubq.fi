@@ -290,6 +290,21 @@ const redirect = (location: string, cookies: readonly string[]): Response => {
 const clearStateCookie = (): string => `${STATE_COOKIE}=; Max-Age=0${COOKIE_ATTRIBUTES}`;
 const clearVerifierCookie = (): string => `${VERIFIER_COOKIE}=; Max-Age=0${COOKIE_ATTRIBUTES}`;
 
+const exchangeCode = async (code: string, codeVerifier: string): Promise<unknown> => {
+  try {
+    const response = await fetch(`${ISSUER}/api/auth/sso/exchange`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Accept: "application/json" },
+      body: JSON.stringify({ code, clientId: "ai", audience: "ai", origin: ORIGIN, redirectUri: CALLBACK, codeVerifier, appSession: true }),
+      redirect: "error",
+      signal: AbortSignal.timeout(10_000),
+    });
+    return await boundedJson(response, 65_536);
+  } catch {
+    throw new PassportError(502);
+  }
+};
+
 const callback = async (req: Request): Promise<Response> => {
   try {
     const params = new URL(req.url).searchParams;
@@ -307,14 +322,7 @@ const callback = async (req: Request): Promise<Response> => {
       params.getAll("code").length !== 1
     )
       throw new PassportError();
-    const response = await fetch(`${ISSUER}/api/auth/sso/exchange`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", Accept: "application/json" },
-      body: JSON.stringify({ code, clientId: "ai", audience: "ai", origin: ORIGIN, redirectUri: CALLBACK, codeVerifier, appSession: true }),
-      redirect: "error",
-      signal: AbortSignal.timeout(10_000),
-    });
-    const body = await boundedJson(response, 65_536);
+    const body = await exchangeCode(code, codeVerifier);
     if (!isRecord(body) || typeof body.accessToken !== "string") throw new PassportError();
     const claims = await verifyToken(body.accessToken);
     if (claims.agentTokenId !== undefined && claims.agentTokenId !== null) throw new PassportError();

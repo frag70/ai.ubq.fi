@@ -31,6 +31,7 @@ const keys = await crypto.subtle.generateKey(
 const publicKey = await crypto.subtle.exportKey("jwk", keys.publicKey);
 const originalFetch = globalThis.fetch;
 let exchangedToken = "";
+let exchangeError: Error | null = null;
 let exchanges: Record<string, unknown>[] = [];
 let jwksStatus = 200;
 
@@ -66,6 +67,7 @@ const request = (path: string, token = "", init: RequestInit = {}): Request => {
 beforeEach(() => {
   resetHarness();
   resetPassportCacheForTest();
+  exchangeError = null;
   exchanges = [];
   jwksStatus = 200;
   globalThis.fetch = createFetchMock(async (input, init) => {
@@ -76,6 +78,7 @@ beforeEach(() => {
       assert.equal(init?.method, "POST");
       assert.equal(init.redirect, "error");
       exchanges.push(JSON.parse(await new Response(init.body).text()) as Record<string, unknown>);
+      if (exchangeError) throw exchangeError;
       return Response.json({ accessToken: exchangedToken, appSession: appGrant });
     }
     if (url === `${ISSUER}/api/auth/sso/session`)
@@ -193,6 +196,24 @@ test("failed Passport callback clears only transient cookies and never creates a
     response.headers.getSetCookie().map((value) => value.split("=")[0]),
     [STATE_COOKIE, VERIFIER_COOKIE]
   );
+});
+
+test("Passport callback returns 502 passport_unavailable on exchange transport or timeout failures while keeping 401 for invalid credentials", async () => {
+  for (const failure of [new TypeError("fetch failed"), new DOMException("The operation timed out.", "TimeoutError")]) {
+    exchangeError = failure;
+    const { state, stateCookie } = await begin();
+    const response = await handler(request(`/auth/callback?state=${state}&code=code`, "", { headers: { Cookie: stateCookie } }));
+    assert.equal(response.status, 502);
+    assert.equal((await response.json()).error.code, "passport_unavailable");
+    assert(response.headers.getSetCookie().some((cookie) => cookie.startsWith(`${STATE_COOKIE}=; Max-Age=0;`)));
+    assert(response.headers.getSetCookie().some((cookie) => cookie.startsWith(`${VERIFIER_COOKIE}=; Max-Age=0;`)));
+  }
+  exchangeError = null;
+  exchangedToken = "invalid-jwt";
+  const { state, stateCookie } = await begin();
+  const invalid = await handler(request(`/auth/callback?state=${state}&code=code`, "", { headers: { Cookie: stateCookie } }));
+  assert.equal(invalid.status, 401);
+  assert.equal((await invalid.json()).error.code, "invalid_api_key");
 });
 
 test("Passport callback only returns to fixed local destinations", async () => {
